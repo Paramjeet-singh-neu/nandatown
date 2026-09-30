@@ -4,7 +4,9 @@ groups during [start, heal) and records when the cut starts and heals."""
 import json
 from pathlib import Path
 
-from nandatown.sim.runner import run_lab
+import pytest
+
+from nandatown.sim.runner import LabError, run_lab
 
 PARTITION_YAML = """
 name: partition-transport
@@ -64,3 +66,35 @@ def test_consensus_completes_after_the_heal(tmp_path):
     assert len(commits) == 1 and commits[0]["at"] > 10.0
     committed = {e["subject"] for e in events if e["kind"] == "value_committed"}
     assert committed == {"acceptor-1", "acceptor-2", "acceptor-3"}
+
+
+DEFECT_YAML = PARTITION_YAML.replace(
+    "config: {value: v42, retry_after: 1.5}",
+    "config: {value: v42, retry_after: 1.5, defect: shrink_quorum_on_timeout}")
+
+
+def run_text(tmp_path, text):
+    path = tmp_path / "scenario.yaml"
+    path.write_text(text)
+    bundle_dir, _ = run_lab(str(path), str(tmp_path / "runs"))
+    lines = (Path(bundle_dir) / "events.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_quorum_shrinking_proposer_commits_on_one_ack_during_the_cut(tmp_path):
+    assert DEFECT_YAML != PARTITION_YAML  # the defect really was added
+    events = run_text(tmp_path, DEFECT_YAML)
+    commits = [e for e in events if e["kind"] == "consensus_committed"]
+    assert len(commits) == 1
+    assert commits[0]["at"] == 2.0
+    assert commits[0]["detail"] == {"acks": ["acceptor-1"], "quorum": 1}
+    committed = {e["subject"] for e in events if e["kind"] == "value_committed"}
+    assert committed == {"acceptor-1"}  # the other commits are lost in the cut
+
+
+def test_unknown_proposer_defect_fails_loudly(tmp_path):
+    typo = PARTITION_YAML.replace(
+        "config: {value: v42, retry_after: 1.5}",
+        "config: {value: v42, retry_after: 1.5, defect: shrink_quorm}")
+    with pytest.raises(LabError, match="unknown proposer defect"):
+        run_text(tmp_path, typo)
