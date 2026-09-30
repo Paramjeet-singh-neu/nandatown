@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from nandatown.layers.transport import MemoryTransport
 from nandatown.sim.runner import LabError, run_lab
 
 PARTITION_YAML = """
@@ -98,3 +99,26 @@ def test_unknown_proposer_defect_fails_loudly(tmp_path):
         "config: {value: v42, retry_after: 1.5, defect: shrink_quorm}")
     with pytest.raises(LabError, match="unknown proposer defect"):
         run_text(tmp_path, typo)
+
+
+JUDGED_YAML = PARTITION_YAML.replace("validator: consensus\n",
+                                     "validator: consensus_partition\n")
+
+
+def judge_text(tmp_path, text):
+    path = tmp_path / "scenario.yaml"
+    path.write_text(text)
+    _, result = run_lab(str(path), str(tmp_path / "runs"))
+    return {s.name: s.status for s in result.stages}
+
+
+def test_a_leaky_partition_fools_the_old_checks_but_not_the_new_ones(
+        tmp_path, monkeypatch):
+    assert JUDGED_YAML != PARTITION_YAML
+    monkeypatch.setattr(MemoryTransport, "_partitioned",
+                        lambda self, sender, to: False)
+    stages = judge_text(tmp_path, JUDGED_YAML)
+    assert stages["quorum_commit"] == "passed"
+    assert stages["agreement"] == "passed"
+    assert stages["partition_enforced"] == "failed"
+    assert stages["progress_after_heal"] == "failed"
